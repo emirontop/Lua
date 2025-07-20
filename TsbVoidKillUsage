@@ -1,0 +1,36 @@
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+local NotificationLib = loadstring(game:HttpGet('https://pastefy.app/b0ukKHDO/raw'))()
+_G.ownerName = "Emocc(pRimeo)" --[[DONT CHANGE THİS]]
+
+NotificationLib:Notify({
+    Title = "LOOK HERE",
+    Text = "u wanna execute the script huh?",
+    Duration = 10,
+    Type = "Warning",
+    Buttons = {}
+})
+task.wait(11)
+
+NotificationLib:Notify({
+    Title = "OK",
+    Text = "OK I will execute have a good day :D",
+    Duration = 7,
+    Type = "Success",
+    Buttons = {}
+})
+task.wait(1)
+
+
+loadstring(game:HttpGet("https://raw.githubusercontent.com/emirontop/Lua/refs/heads/main/TsbVoidKill.V2"))()
+
+
+task.wait(120)
+NotificationLib:Notify({
+    Title = "BTW",
+    Text = _G.OwnerText,
+    Duration = 10,
+    Type = "Warning",
+    Buttons = {}
+})
