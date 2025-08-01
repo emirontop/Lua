@@ -1,26 +1,58 @@
+--!strict
 
+-- Load the WindUI Library from GitHub using the user's provided working example method.
+-- This method uses the releases/latest/download link.
+local WindUI_Loaded, WindUI_Result = pcall(function()
+    -- The WindUI loading link and format from the user's working example
+    local code = game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua")
+    if not code or #code == 0 then
+        error("WindUI main.lua content is empty or could not be retrieved.")
+    end
+    -- Execute the loaded code directly
+    return loadstring(code)() 
+end)
 
-local Players           = game:GetService("Players")
+local WindUI = nil
+if WindUI_Loaded then
+    WindUI = WindUI_Result
+    print("WindUI Library successfully loaded. Type:", typeof(WindUI))
+else
+    warn("CRITICAL ERROR: An issue occurred while loading the WindUI Library! Please check your internet connection and the GitHub link. Error:", WindUI_Result)
+    return -- Stop the script if WindUI cannot be loaded
+end
+
+if not WindUI then
+    warn("Error: WindUI object is nil. GUI will not be created. Script stopped.")
+    return
+end
+
+-- Roblox Services
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local UserInputService  = game:GetService("UserInputService")
-local StarterGui        = game:GetService("StarterGui")
-local LocalPlayer       = Players.LocalPlayer
-local Backpack          = LocalPlayer:WaitForChild("Backpack")
-local Character         = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local LocalPlayer = Players.LocalPlayer
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local Backpack = LocalPlayer:WaitForChild("Backpack")
+local HttpService = game:GetService("HttpService") -- Required for JSONEncode
+local RunService = game:GetService("RunService") -- For Heartbeat loop
 
-local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+-- Global Variables
+local localPlayerFarmId = "Not Found"
+local currentShecklesAmount = "Loading..."
+local EkilexekSeed = {} -- Seeds to auto plant
+local plantingEnabled = false -- Is auto planting enabled?
 
--- Seçilenler
-local EkilexekSeed = {}
-local selectedSeeds = {}
-local selectedGears = {}
-local selectedEggs = {}
-local plantingEnabled = false
-local plantingPosition = nil
-local plantingPart = nil
-local boughtSeedsLog = {} -- ["Sugar Apple"] = 3, vs.
+local EkilexekBuySeed = {} -- Seeds to auto buy
+local autoBuyEnabled = false -- Is auto buying enabled?
 
--- Farm konumları (farmNumber => pozisyon)
+local autoHarvestEnabled = false -- Is auto harvesting enabled?
+local HarvestIgnores = { -- Blacklist: Items in this list will NOT be harvested if selected
+	Normal = false,
+	Gold = false,
+	Rainbow = false
+}
+-- EkilexekHarvest removed as per user request (no specific harvestable items selection)
+
+-- Farm positions (farmNumber => position)
 local farmPositions = {
     [4] = Vector3.new(-70.54048156738281, 0.13552704453468323, 87.05094146728516),
     [2] = Vector3.new(68.38848876953125, 0.13552704453468323, 83.08100128173828),
@@ -29,47 +61,51 @@ local farmPositions = {
     [5] = Vector3.new(-274.8962707519531, 0.13552704453468323, -106.14342498779297),
 }
 
-local function tw(tm)
-    
-    task.wait(tm)
-    
+-- Original player properties (saved for noclip toggle)
+local originalWalkSpeed = 16 -- Default Roblox walk speed
+local originalJumpPower = 50 -- Default Roblox jump power
+local originalCanCollide = true -- Default HumanoidRootPart CanCollide
+local originalPlatformStand = false -- Default Humanoid PlatformStand state
+local originalSit = false -- Default Humanoid Sit state
+
+-- Noclip toggle function
+local function toggleNoclip(enable)
+    local HumanoidRootPart = Character:FindFirstChild("HumanoidRootPart")
+    local Humanoid = Character:FindFirstChildOfClass("Humanoid")
+
+    if HumanoidRootPart and Humanoid then
+        if enable then
+            -- Save current values
+            originalCanCollide = HumanoidRootPart.CanCollide
+            originalWalkSpeed = Humanoid.WalkSpeed
+            originalJumpPower = Humanoid.JumpPower
+            originalPlatformStand = Humanoid.PlatformStand
+            originalSit = Humanoid.Sit
+
+            -- Apply noclip settings
+            HumanoidRootPart.CanCollide = false
+            Humanoid.WalkSpeed = 0 -- Prevent self-movement
+            Humanoid.JumpPower = 0 -- Disable jumping
+            Humanoid.PlatformStand = true -- Prevent falling
+            Humanoid.Sit = true -- Make character "sit" to aid CFrame manipulation
+            print("Noclip ON.")
+        else
+            -- Restore original values
+            HumanoidRootPart.CanCollide = originalCanCollide
+            Humanoid.WalkSpeed = originalWalkSpeed
+            Humanoid.JumpPower = originalJumpPower
+            Humanoid.PlatformStand = originalPlatformStand -- Crucial: Reset PlatformStand
+            Humanoid.Sit = originalSit -- Explicitly set to original state
+            print("Noclip OFF.")
+        end
+    end
 end
 
-local function Not(msg)
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Notification = ReplicatedStorage.GameEvents.Notification
-firesignal(Notification.OnClientEvent, 
-    msg
-)
-
-end
-
-
-
-local SellRemote = game:WaitForChild("ReplicatedStorage"):WaitForChild("GameEvents"):WaitForChild("Sell_Inventory")
-
-local SelRemote =
--- Remote'e boş argüman gönder, hata vermezse argüman istemiyordur
-game:WaitForChild("ReplicatedStorage"):WaitForChild("GameEvents"):WaitForChild("Sell_Item")
-
-
-
--- Bildirim fonksiyonu
-local function notify(title, text)
-    pcall(function()
-        StarterGui:SetCore("SendNotification", {
-            Title = title,
-            Text = text,
-            Duration = 4,
-        })
-    end)
-end
-
--- Kendi farm'ını bul (owner == player.name)
+-- Find own farm (owner == player.name)
 local function getOwnFarm()
     local farmFolder = workspace:FindFirstChild("Farm")
     if not farmFolder then
-        notify("Hata", "workspace.Farm bulunamadı")
+        warn("Error: workspace.Farm not found.")
         return nil
     end
     for _, farm in ipairs(farmFolder:GetChildren()) do
@@ -77,88 +113,49 @@ local function getOwnFarm()
         local data = imp and imp:FindFirstChild("Data")
         local owner = data and data:FindFirstChild("Owner")
         if owner and owner.Value == LocalPlayer.Name then
+            print("Own farm found: " .. farm.Name)
             return farm
         end
     end
-    notify("Hata", "Sana ait farm bulunamadı")
+    warn("Error: Your farm not found.")
     return nil
 end
 
--- Elimizde seçilen seed var mı?
+-- Check if selected seed is in hand
 local function hasSeedInHand(seedName)
     local tool = Character:FindFirstChildOfClass("Tool")
     return tool and tool.Name:lower():find(seedName:lower() .. " seed")
 end
 
--- Seed tool'u backpack'ten eline al
+-- Equip seed tool from backpack
 local function equipSeedTool(seedName)
     for _, tool in ipairs(Backpack:GetChildren()) do
         if tool:IsA("Tool") and tool.Name:lower():find(seedName:lower() .. " seed") then
             local humanoid = Character:FindFirstChildOfClass("Humanoid")
             if humanoid then
                 humanoid:EquipTool(tool)
-                notify("Tohum Alındı", "Eline alındı: "..tool.Name)
+                print("Seed equipped: "..tool.Name)
                 return true
             end
         end
     end
-    notify("Hata", seedName.." Seed tool bulunamadı")
+    warn("Error: "..seedName.." Seed tool not found.")
     return false
 end
 
--- Plant_RE event'i ile ekim yap
+-- Plant_RE event to plant seed
 local function plantSeed(position, seedName)
     local ge = ReplicatedStorage:FindFirstChild("GameEvents")
     local plantRE = ge and ge:FindFirstChild("Plant_RE")
     if not plantRE or typeof(plantRE.FireServer) ~= "function" then
-        notify("Hata", "Plant_RE event bulunamadı")
+        warn("Error: Plant_RE event not found.")
         return
     end
     plantRE:FireServer(position, seedName)
+    print("Planted: " .. seedName .. " @ " .. tostring(position))
 end
 
--- Otomatik Tohum Alma
-local function autoBuySeeds()
-    while true do
-        for _, seed in ipairs(selectedSeeds) do
-            pcall(function()
-                ReplicatedStorage.GameEvents.BuySeedStock:FireServer(seed)
-                boughtSeedsLog[seed] = (boughtSeedsLog[seed] or 0) + 1
-            end)
-            task.wait(0.15)
-        end
-        task.wait(0.5)
-    end
-end
-
-
--- Otomatik Ekipman Alma
-local function autoBuyGears()
-    while true do
-        for _, gear in ipairs(selectedGears) do
-            pcall(function()
-                ReplicatedStorage.GameEvents.BuyGearStock:FireServer(gear)
-            end)
-            task.wait(0.15)
-        end
-        task.wait(0.5)
-    end
-end
-
--- Otomatik Yumurta Alma
-local function autoBuyEggs()
-    while true do
-        for _, egg in ipairs(selectedEggs) do
-            pcall(function()
-                ReplicatedStorage.GameEvents.BuyEggStock:FireServer(egg)
-            end)
-            task.wait(0.15)
-        end
-        task.wait(0.5)
-    end
-end
-
--- Otomatik Ekim
+-- Auto Planting main function
 local function autoPlant()
     while plantingEnabled do
         local farm = getOwnFarm()
@@ -169,843 +166,873 @@ local function autoPlant()
             if pos then
                 for _, seed in ipairs(EkilexekSeed) do
                     if not hasSeedInHand(seed) then
-                        if not equipSeedTool(seed) then break end
+                        if not equipSeedTool(seed) then 
+                            warn("Warning: " .. seed .. " tool not found or could not be equipped, skipping.")
+                            continue -- Skip this seed and move to the next
+                        end
                         task.wait(0.3)
                     end
                     plantSeed(pos, seed)
                     task.wait(0.2)
                 end
             else
-                notify("Uyarı", "Farm_Number " .. tostring(farmNumber) .. " için konum yok")
+                warn("Warning: No position for Farm_Number " .. tostring(farmNumber))
             end
         else
-            notify("Uyarı", "Farm bulunamadı veya tohum seçilmedi")
+            warn("Warning: Farm not found or no seeds selected for planting.")
         end
-        task.wait(0.5)
+        task.wait(0.5) -- Adjusted wait time for less lag
     end
 end
 
+-- Auto Buy Seed function
+local function buySeed(seedName)
+    local ge = ReplicatedStorage:FindFirstChild("GameEvents")
+    local buySeedStockRE = ge and ge:FindFirstChild("BuySeedStock")
+    if not buySeedStockRE or typeof(buySeedStockRE.FireServer) ~= "function" then
+        warn("Error: BuySeedStock event not found.")
+        return
+    end
+    buySeedStockRE:FireServer(seedName)
+    print("Seed purchased: " .. seedName)
+end
 
-
-
--- GUI oluşturma
-
-local Window = Rayfield:CreateWindow({
-   Name = "Emocii Hub [GaG]",
-   Icon = 0, -- Icon in Topbar. Can use Lucide Icons (string) or Roblox Image (number). 0 to use no icon (default).
-   LoadingTitle = "Emocii Hub [GaG]",
-   LoadingSubtitle = "by Emocii",
-   ShowText = "Emocii", -- for mobile users to unhide rayfield, change if you'd like
-   Theme = "Default", -- Check https://docs.sirius.menu/rayfield/configuration/themes
-
-   ToggleUIKeybind = "K", -- The keybind to toggle the UI visibility (string like "K" or Enum.KeyCode)
-
-   DisableRayfieldPrompts = true,
-   DisableBuildWarnings = false, -- Prevents Rayfield from warning when the script has a version mismatch with the interface
-
-   ConfigurationSaving = {
-      Enabled = true,
-      FolderName = nil, -- Create a custom folder for your hub/game
-      FileName = "Emocii Hub"
-   },
-
-   Discord = {
-      Enabled = true, -- Prompt the user to join your Discord server if their executor supports it
-      Invite = "noinvitelink", -- The Discord invite code, do not include discord.gg/. E.g. discord.gg/ ABCD would be ABCD
-      RememberJoins = true -- Set this to false to make them join the discord every time they load it up
-   },
-
-   KeySystem = false, -- Set this to true to use our key system
-   KeySettings = {
-      Title = "Untitled",
-      Subtitle = "Key System",
-      Note = "No method of obtaining the key is provided", -- Use this to tell the user how to get a key
-      FileName = "Key", -- It is recommended to use something unique as other scripts using Rayfield may overwrite your key file
-      SaveKey = true, -- The user's key will be saved, but if you change the key, they will be unable to use your script
-      GrabKeyFromSite = false, -- If this is true, set Key below to the RAW site you would like Rayfield to get the key from
-      Key = {"Hello"} -- List of keys that will be accepted by the system, can be RAW file links (pastebin, github etc) or simple strings ("hello","key22")
-   }
-})
-
-
-
-local RestockTab = Window:CreateTab("🕒 Restock", 4483362458)
-
--- 1. Paragraf: Timer bilgileri
-local TimerParagraph = RestockTab:CreateParagraph({
-    Title = "🕒 Mağaza Yenileme Zamanları",
-    Content = "Yükleniyor..."
-})
-
--- 2. Paragraf: Tohum Stok bilgileri
-local StockParagraph = RestockTab:CreateParagraph({
-    Title = "🌱 Tohum Stokları",
-    Content = "Yükleniyor..."
-})
-
--- 3. Paragraf: Gear Shop stok bilgileri
-local GearStockParagraph = RestockTab:CreateParagraph({
-    Title = "🛠️ Gear Shop Stokları",
-    Content = "Yükleniyor..."
-})
-
--- 4. Paragraf: Pet Shop stok bilgileri
-local PetStockParagraph = RestockTab:CreateParagraph({
-    Title = "🐾 Pet Shop Stokları",
-    Content = "Yükleniyor..."
-})
-
--- Fonksiyon: Bilgileri güncelle
-local function updateRestockInfo()
-    while true do
-        local playerGui = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
-
-        -- TIMER bilgilerini al
-        local function getTimerText(framePath)
-            local success, result = pcall(function()
-                if framePath and framePath:IsA("TextLabel") then
-                    return framePath.Text
-                else
-                    return "Bulunamadı"
-                end
-            end)
-            return result or "Hata"
-        end
-
-        -- Tüm timer değerlerini oku
-        local seedTimer = getTimerText(playerGui:FindFirstChild("Seed_Shop") and playerGui.Seed_Shop.Frame.Frame:FindFirstChild("Timer"))
-        local petTimer  = getTimerText(playerGui:FindFirstChild("PetShop_UI") and playerGui.PetShop_UI.Frame.Frame:FindFirstChild("Timer"))
-        local gearTimer = getTimerText(playerGui:FindFirstChild("Gear_Shop") and playerGui.Gear_Shop.Frame.Frame:FindFirstChild("Timer"))
-
-        -- Paragraf 1: Timer Bilgileri
-        TimerParagraph:Set({
-            Title = "⏳ Mağaza Yenilenme Süreleri",
-            Content = string.format("🌱 Seed Shop: %s\n🐾 Pet Shop: %s\n⚙️ Gear Shop: %s", seedTimer, petTimer, gearTimer)
-        })
-
-        -- Paragraf 2: Seed Shop stokları
-        local seedStockLines = {}
-        local seedFrame = playerGui:FindFirstChild("Seed_Shop") and playerGui.Seed_Shop.Frame:FindFirstChild("ScrollingFrame")
-        if seedFrame then
-            for _, item in pairs(seedFrame:GetChildren()) do
-                if item:IsA("Frame") and item:FindFirstChild("Main_Frame") and item.Main_Frame:FindFirstChild("Stock_Text") then
-                    local stockText = item.Main_Frame.Stock_Text.Text
-                    table.insert(seedStockLines, "🌾 " .. item.Name .. ": " .. stockText)
-                end
+-- Auto Buy main loop
+local function autoBuyLoop()
+    while autoBuyEnabled do
+        if #EkilexekBuySeed > 0 then
+            for _, seed in ipairs(EkilexekBuySeed) do
+                buySeed(seed)
+                task.wait(1) -- Short wait between purchases
             end
         else
-            table.insert(seedStockLines, "📦 Seed Shop verisi alınamadı.")
+            warn("Warning: No seeds selected for auto buying.")
         end
-
-        StockParagraph:Set({
-            Title = "🌱 Seed Shop Stokları",
-            Content = table.concat(seedStockLines, "\n")
-        })
-
-        -- Paragraf 3: Gear Shop stokları
-        local gearStockLines = {}
-        local gearFrame = playerGui:FindFirstChild("Gear_Shop") and playerGui.Gear_Shop.Frame:FindFirstChild("ScrollingFrame")
-        if gearFrame then
-            for _, item in pairs(gearFrame:GetChildren()) do
-                if item:IsA("Frame") and item:FindFirstChild("Main_Frame") and item.Main_Frame:FindFirstChild("Stock_Text") then
-                    local stockText = item.Main_Frame.Stock_Text.Text
-                    table.insert(gearStockLines, "🔧 " .. item.Name .. ": " .. stockText)
-                end
-            end
-        else
-            table.insert(gearStockLines, "📦 Gear Shop verisi alınamadı.")
-        end
-
-        GearStockParagraph:Set({
-            Title = "🛠️ Gear Shop Stokları",
-            Content = table.concat(gearStockLines, "\n")
-        })
-
-        -- Paragraf 4: Pet Shop stokları (özellikle Bug Egg dahil)
-        local petStockLines = {}
-        local petFrame = playerGui:FindFirstChild("PetShop_UI") and playerGui.PetShop_UI.Frame:FindFirstChild("ScrollingFrame")
-        if petFrame then
-            for _, item in pairs(petFrame:GetChildren()) do
-                if item:IsA("Frame") and item:FindFirstChild("Main_Frame") and item.Main_Frame:FindFirstChild("Stock_Text") then
-                    local stockText = item.Main_Frame.Stock_Text.Text
-                    table.insert(petStockLines, "🐣 " .. item.Name .. ": " .. stockText)
-                end
-            end
-        else
-            table.insert(petStockLines, "📦 Pet Shop verisi alınamadı.")
-        end
-
-        PetStockParagraph:Set({
-            Title = "🐾 Pet Shop Stokları",
-            Content = table.concat(petStockLines, "\n")
-        })
-
-        task.wait(1)
+        task.wait(5) -- Repeat purchase cycle every 5 seconds
     end
 end
 
-task.spawn(updateRestockInfo)
+-- Harvest functions from autofarm.lua.txt
+local function HarvestPlant(Plant: Model)
+	local Prompt = Plant:FindFirstChild("ProximityPrompt", true)
 
-local FarmTab = Window:CreateTab("Idk why i add", 4483362458)
-
-FarmTab:CreateButton({
-    Name = "Sell İnv",
-    Callback = function()
-        local player = game.Players.LocalPlayer
-        local char = player.Character or player.CharacterAdded:Wait()
-        local hrp = char:WaitForChild("HumanoidRootPart")
-        -- 🔒 Eski konumu kaydet
-        local originalPos = hrp.Position
-        -- 🌀 Yeni konuma ışınla
-        hrp.CFrame = CFrame.new(87, 3, 0)
-        -- 🔁 Küçük gecikme (teleport tamamlanması için)
-        task.wait(0.1)
-        -- 🚀 Remote çalıştır (boş argümanlı)
-        pcall(function()
-            SellRemote:FireServer()
-        end)
-        -- 🔙 Geri dön
-        task.wait(0.4)
-        hrp.CFrame = CFrame.new(originalPos)
-    end,
-})
-
-FarmTab:CreateButton({
-    Name = "Sell Single(Need Hold)",
-    Callback = function()
-        local player = game.Players.LocalPlayer
-        local char = player.Character or player.CharacterAdded:Wait()
-        local hrp = char:WaitForChild("HumanoidRootPart")
-        -- 🔒 Eski konumu kaydet
-        local originalPos = hrp.Position
-        -- 🌀 Yeni konuma ışınla
-        hrp.CFrame = CFrame.new(87, 3, 0)
-        -- 🔁 Küçük gecikme (teleport tamamlanması için)
-        task.wait(0.1)
-        -- 🚀 Remote çalıştır (boş argümanlı)
-        pcall(function()
-            SelRemote:FireServer()
-        end)
-        -- 🔙 Geri dön
-        task.wait(0.4)
-        hrp.CFrame = CFrame.new(originalPos)
-    end,
-})
-
-
--- Tohumlar tab
-local SeedTab = Window:CreateTab("🌱 Seeds", 4483362458)
-SeedTab:CreateDropdown({
-	Name = "Tohum Seç",
-	Options = {"Carrot", "Strawberry", "Blueberry", "Orange Tulip", "Tomato", "Corn", "Daffodil", "Watermelon", "Pumpkin", "Apple", "Bamboo","Coconut","Cactus","Dragon Fruit","Mango","Grape","Mushroom","Pepper","Cacao","Beanstalk","Ember Lily","Sugar Apple","Burning Bud","Giant Pinecone","Elder Strawbery"},
-	CurrentOption = {},
-	MultipleOptions = true,
-	Flag = "SeedDropdown",
-	Callback = function(Options)
-		selectedSeeds = Options
-	end
-})
-
-local SeedToggle = SeedTab:CreateToggle({
-	Name = "Otomatik Tohum Al",
-	CurrentValue = false,
-	Flag = "AutoSeed",
-	Callback = function(Value)
-		if Value then
-			task.spawn(autoBuySeeds)
-		end
-	end,
-})
-
--- Ekipman tab
-local GearTab = Window:CreateTab("🛠️ Gear", 4483362458)
-GearTab:CreateDropdown({
-	Name = "Ekipman Seç",
-	Options = {"Watering Can","Trowel","Recall Wrench","Basic Sprinkler","Advanced Sprinkler","Medium Treat","Medium Toy","Godly Sprinkler","Magnifying Glass","Master Sprinkler","Cleaning Spray","Favorite Tool","Harvest Tool","Friendship Pot","Level Up Lollipop"},
-	CurrentOption = {},
-	MultipleOptions = true,
-	Flag = "GearDropdown",
-	Callback = function(Options)
-		selectedGears = Options
-	end
-})
-
-local GearToggle = GearTab:CreateToggle({
-	Name = "Otomatik Ekipman Al",
-	CurrentValue = false,
-	Flag = "AutoGear",
-	Callback = function(Value)
-		if Value then
-			task.spawn(autoBuyGears)
-		end
-	end,
-})
-
--- Yumurtalar tab
-local EggTab = Window:CreateTab("🥚 Eggs", 4483362458)
-EggTab:CreateDropdown({
-	Name = "Yumurta Seç",
-	Options = {"Chicken Egg", "Duck Egg"},
-	CurrentOption = {},
-	MultipleOptions = true,
-	Flag = "EggDropdown",
-	Callback = function(Options)
-		selectedEggs = Options
-	end
-})
-
-local EggToggle = EggTab:CreateToggle({
-	Name = "Otomatik Yumurta Al",
-	CurrentValue = false,
-	Flag = "AutoEgg",
-	Callback = function(Value)
-		if Value then
-			task.spawn(autoBuyEggs)
-		end
-	end,
-})
-
--- Ekim tab
-local PlantTab = Window:CreateTab("🧪 Planting", 4483362458)
-PlantTab:CreateParagraph({Title = "Seçili Konum", Content = "FarmNumber'a göre otomatik konum seçilir."})
-PlantTab:CreateDropdown({
-	Name = "Tohum Seç",
-	Options = {"Carrot", "Strawberry", "Blueberry", "Orange Tulip", "Tomato", "Corn", "Daffodil", "Watermelon", "Pumpkin", "Apple", "Bamboo","Coconut","Cactus","Dragon Fruit","Mango","Grape","Mushroom","Pepper","Cacao","Beanstalk","Ember Lily","Sugar Apple","Burning Bud","Giant Pinecone","Elder Strawbery"},
-	CurrentOption = {},
-	MultipleOptions = true,
-	Flag = "SeedDropdown",
-	Callback = function(Options)
-		EkilexekSeed = Options
-	end
-})
-
-
-PlantTab:CreateToggle({
-	Name = "Otomatik Ekim",
-	CurrentValue = false,
-	Flag = "AutoPlanting",
-	Callback = function(Value)
-		plantingEnabled = Value
-		if Value then
-			task.spawn(autoPlant)
-		end
-	end
-})
-
-
-
-local CreTab = Window:CreateTab("Help", 4483362458)
-
-local Paragraph = CreTab:CreateParagraph({Title = "Credits", Content = "Owner:Emocii \ngui:Rayfield"})
-
-local Button = CreTab:CreateButton({
-   Name = "Copy Gui source",
-   Callback = function()
-    setclipboard("https://docs.sirius.menu/rayfield")
-    toclipboard("https://docs.sirius.menu/rayfield")
-       -- The function that takes place when the button is pressed
-   end,
-})
-local Button = CreTab:CreateButton({
-   Name = "Copy Owner Dc name ",
-   Callback = function()
-    setclipboard("bhak._")
-    toclipboard("bhak._")
-       -- The function that takes place when the button is pressed
-   end,
-})
-local Button = CreTab:CreateButton({
-   Name = "copy script",
-   Callback = function()
-    setclipboard("Dickhead")
-    toclipboard("Dickhead")
-       -- The function that takes place when the button is pressed
-   end,
-})
-
-local Label = CreTab:CreateLabel("///////////////////////////////////////////////////////////////////////////////////////////////////////////////", 4483362458, false) -- Title, Icon, Color, IgnoreTheme
-
-
-
-local Mutations = {
-    {
-        name = "Friendbound", x = 70,
-        info = {
-            "Obtained through Friendship Pots (More pots = higher mutation chance).",
-            "Obtained by having 5 friends (connections) in a server.",
-            "Pink in color.",
-            "Emits pink hearts and stars."
-        }
-    },
-    {
-        name = "Sundried", x = 85,
-        info = {
-            "During a Heatwave or Solar Flare event.",
-            "Can redirect with a Tanning Mirror.",
-            "Dark brown tint applied"
-        }
-    },
-    {
-        name = "Aurora", x = 90,
-        info = {
-            "Have a chance of applying during Aurora Borealis.",
-            "Have a chance to appear during night.",
-            "Shifts between blues and purples.",
-            "Releases faint smoke.",
-            "Purplish, Whitish glow"
-        }
-    },
-    {
-        name = "Shocked", x = 100,
-        info = {
-            "Struck by lightning during Thunderstorm or Jandel Storm",
-            "Using the Mutation Spray Shocked",
-            "Neon glow"
-        }
-    },
-    {
-        name = "Celestial", x = 120,
-        info = {
-            "During Meteor Shower",
-            "Reflective",
-            "Sparkling yellow and purple"
-        }
-    },
-    {
-        name = "Dawnbound", x = 150,
-        info = {
-            "During Sun God Event",
-            "4 players must hold Sunflowers in front of the Sun God",
-            "Also applied by pets with the Ascended mutation",
-            "Glowing, electrified look"
-        }
-    },
-    {
-        name = "Burnt", x = 4,
-        info = {
-            "Can be applied by the Cooked Owl pet.",
-            "Can be applied by the Mutation Spray Burnt.",
-            "Can be applied by the Extinction Weather.",
-            "Unharvested: Black in color, Sparking",
-            "Harvested: Black in color, Emits ash particles"
-        }
-    },
-    {
-        name = "Static", x = 8,
-        info = {
-            "Obtained from raiju pet after devouring a shocked fruit",
-            "Emits yellow electricity particles"
-        }
-    },
-    {
-        name = "Amber", x = 10,
-        info = {
-            "Using Amber Mutation Spray.",
-            "Small chance to be applied by the Raptor pet when a fruit is harvested.",
-            "Coated in semi-transparent orange overlay, emits orange cloud particles."
-        }
-    },
-    {
-        name = "Cooked", x = 10,
-        info = {
-            "Small chance to be applied by the Cooked Owl pet.",
-            "Orange in color.",
-            "Emits white steam and red swirls."
-        }
-    },
-    {
-        name = "Chakra", x = 15,
-        info = {
-            "Can be applied by the Kitsune pet when stolen.",
-            "Red electric particles around the crop with the red star particle in the handle."
-        }
-    },
-    {
-        name = "CorruptChakra", x = 15,
-        info = {
-            "20.29% chance every 20 minutes from the Corrupted Kitsune",
-            "Blue lightning sparks around the plant with blue stars in the middle"
-        }
-    },
-    {
-        name = "Tranquil", x = 20,
-        info = {
-            "Obtained by the Tranquil weather event.",
-            "Obtained also by the Tanchozuru when it meditates every 10 minutes.",
-            "Obtained also by pets with the Tranquil mutation",
-            "Has a white, circular rippling effect.",
-            "Words like \"信\", \"命\", \"夢\", and \"氣\" appear."
-        }
-    },
-    {
-        name = "OldAmber", x = 20,
-        info = {
-            "After 24 hours, the Amber mutation will age into OldAmber.",
-            "Cannot coexist with any of the other Amber mutation stages.",
-            "More orange than its yellow predecessor."
-        }
-    },
-    {
-        name = "Corrupt", x = 20,
-        info = {
-            "Can be applied by the pet that have Corrupted Mutation.",
-            "Emits falling red and black particles",
-            "Red lightning"
-        }
-    },
-    {
-        name = "Zombified", x = 25,
-        info = {
-            "Can be applied by the Chicken Zombie pet.",
-            "Emits a green fog.",
-            "Dripping with green liquid."
-        }
-    },
-    {
-        name = "HarmonizedChakra", x = 35,
-        info = {
-            "Requires chakra and corrupted chakra",
-            "Magenta rays and lightning streak out of the fruit with stars on the handle.",
-            "A faint magenta halo around the crop."
-        }
-    },
-    {
-        name = "AncientAmber", x = 50,
-        info = {
-            "After 2 days, OldAmber will age into AncientAmber.",
-            "Orange Particles."
-        }
-    },
-    {
-        name = "FoxfireChakra", x = 90,
-        info = {
-            "Very rare chance to be applied when a fruit is duplicated by the Kitsune pet.",
-            "Intense red electric particles around the crop.",
-            "Imbues the crop with red flames."
-        }
-    },
-    {
-        name = "CorruptFoxfireChakra", x = 90,
-        info = {
-            "Extremely Rare mutation from the Corrupted Kitsune",
-            "Blue lightning sparks around the plant with blue stars in the middle",
-            "Imbues the crop with blue flames"
-        }
-    },
-    {
-        name = "Paradisal", x = 100,
-        info = {
-            "Occurs when a plant is both Verdant and Sundried, replaces both mutations.",
-            "Lime Green in color",
-            "Emits sun ray-like particles."
-        }
-    },
-    {
-        name = "Disco", x = 125,
-        info = {
-            "During a Disco event. (Can be spawned by admins)",
-            "Can be applied by the Disco Bee pet and Mutation Disco Spray."
-        }
-    },
-    {
-        name = "Heavenly", x = 5,
-        info = {
-            "During a Jandel float event (Can only be spawned by Admin).",
-            "Emits Glow, shining fire from the base."
-        }
-    },
-    {
-        name = "Voidtouched", x = 135,
-        info = {
-            "During a Black Hole event (Can only be spawned by admins).",
-            "Emits black hole particles"
-        }
-    },
-    {
-        name = "Meteoric", x = 125,
-        info = {
-            "During a Meteor event (Can only be spawned by admins).",
-            "Having golden-yellow particles around the crop."
-        }
-    },
-    {
-        name = "Galactic", x = 120,
-        info = {
-            "During a Space Travel event (Can only be spawned by admins).",
-            "Turns the crop a light purple, some parts of the fruit are glowing."
-        }
-    },
-    {
-        name = "Infected", x = 75,
-        info = {
-            "During a Jandel Zombie event.",
-            "Emits small, hazy green particles",
-            "Completely green in color"
-        }
-    },
-    {
-        name = "Jackpot", x = 77,
-        info = {
-            "Rare mutation from a Money Rain event (Can only be spawned by admins).",
-            "Emits falling robux particles",
-            "Emits shiny star particles"
-        }
-    },
-    {
-        name = "Blitzshock", x = 50,
-        info = {
-            "Obtained during an Admin weather event exclusive to the Celebrity Guest Event.",
-            "Blue tint with neon shine.",
-            "Has yellow and blue \"electric\" particles swirling around.",
-            "Occasionally emits a blue cloud puff."
-        }
-    },
-    {
-        name = "Plasma", x = 5,
-        info = {
-            "During a Laser Storm.",
-            "Neon.",
-            "Pinkish purple in color."
-        }
-    },
-    {
-        name = "Touchdown", x = 125,
-        info = {
-            "Given during the Travis Kelce event",
-            "Red and orange sparkles spray out of the bottom of the fruit."
-        }
-    },
-    {
-        name = "Alienlike", x = 100,
-        info = {
-            "During the Alien Invasion Event. (Can only be spawned by admins).",
-            "Cyan in color",
-            "Cyan particles emitted from the fruit",
-            "Parts of fruit can be fully transparent/invisible, or be partially transparent."
-        }
-    },
-    {
-        name = "Radioactive", x = 80,
-        info = {
-            "During a Carrot Rocket event",
-            "Neon green in color"
-        }
-    },
-    {
-        name = "Molten", x = 25,
-        info = {
-            "During a Volcano event.",
-            "Neon.",
-            "Orange, yellow and red in color."
-        }
-    },
-    {
-        name = "Fried", x = 8,
-        info = {
-            "During a Fried Chicken event.",
-            "Small yellow particles fall from the crop."
-        }
-    },
-    {
-        name = "Subzero", x = 50,
-        info = {} -- Bilgi eksik
-    },
-    {
-        name = "Cosmic", x = 140,
-        info = {
-            "A mutation when a comet hits a fruit during the comet event (Can only be spawned by admins).",
-            "Unknown (Unreleased)"
-        }
-    },
-    {
-        name = "Equinox", x = 165,
-        info = {
-            "Rare mutation from a Eclipse event (Can only be spawned by admins).",
-            "Unknown (Unreleased)"
-        }
-    },
-    {
-        name = "Eclipsed", x = 15,
-        info = {
-            "During Solar Eclipse",
-            "Unknown (Unreleased)"
-        }
-    },
-    {
-        name = "Wiltproof", x = 4,
-        info = {
-            "Obtainable in the Drought Weather.",
-            "Unknown (Unreleased)"
-        }
-    },
-    {
-        name = "Enlightened", x = 35,
-        info = {
-            "Unknown (Unreleased)"
-        }
-    },
-    {
-        name = "Toxic",
-        x = 12,
-        info = {
-            "During Acid Rain",
-            "Unknown"
-        }
-    }
-}
-
--- Mutations tablosu burada tamamlanmıştır.
-
--- Başta boş paragraf
-local Paragraph = CreTab:CreateParagraph({
-    Title = "Bilgi",
-    Content = "Arama sonuçları burada görünecek."
-})
-
--- Arama kutusu
-
-
-
-
-local AramaKutusu = CreTab:CreateInput({
-    Name = "Search Mutation",
-    PlaceholderText = "Toxic, Gold, Rainbow, Fried...",
-    RemoveTextAfterFocusLost = false,
-    Callback = function(text)
-        local aranacak = string.lower(text)
-        local sonuc = ""
-
-        for _, bilgi in pairs(Mutations) do
-            local isim = tostring(bilgi.name or "???")
-            local carpim = tostring(bilgi.x or "?")
-            local aciklama = ""
-
-            if type(bilgi.info) == "table" then
-                aciklama = table.concat(bilgi.info, "\n")
-            else
-                aciklama = tostring(bilgi.info or "-")
-            end
-
-            if string.find(string.lower(isim), aranacak) then
-                sonuc = sonuc .. "🔸 " .. isim .. " (" .. carpim .. "x multi)\n" .. aciklama .. "\n\n"
-            end
-        end
-
-        if sonuc == "" then
-            sonuc = "❌ Eşleşme bulunamadı."
-        end
-
-        Paragraph:Set({
-            Title = "Bilgi Sonuçları",
-            Content = sonuc
-        })
+	--// Check if it can be harvested
+	if not Prompt then
+        warn("Error: ProximityPrompt not found in plant '" .. Plant.Name .. "'.")
+        return
     end
-})
+    if not Prompt.Enabled then
+        print("Info: ProximityPrompt for plant '" .. Plant.Name .. "' is not enabled.")
+        return
+    end
+    print("Triggering ProximityPrompt for: " .. Plant.Name)
+	fireproximityprompt(Prompt)
+end
 
+local function CanHarvest(Plant): boolean
+    local Prompt = Plant:FindFirstChild("ProximityPrompt", true)
+	if not Prompt then return false end
+    if not Prompt.Enabled then return false end
 
+    return true
+end
 
-local SettingsTab = Window:CreateTab("⚙️ Settings", 4483362458)
+-- This function is no longer needed as the dropdown is removed
+-- local function GetAllUniquePlantVariants()
+--     local uniqueVariants = {}
+--     local seen = {}
 
--- Webhook girişi
-local WebhookBox = SettingsTab:CreateInput({
-   Name = "Webhook URL",
-   PlaceholderText = "https://discord.com/api/webhooks/...",
-   RemoveTextAfterFocusLost = false,
-   Callback = function(Text)
-       getgenv().WebhookURL = Text
-       notify("Ayarlandı", "Webhook kaydedildi.")
-   end,
-})
+--     local function collectVariantsRecursive(parent)
+--         for _, plant in ipairs(parent:GetChildren()) do
+--             local variant = plant:FindFirstChild("Variant")
+--             if variant and variant:IsA("StringValue") then
+--                 local variantName = variant.Value
+--                 if not seen[variantName] then
+--                     table.insert(uniqueVariants, variantName)
+--                     seen[variantName] = true
+--                 end
+--             end
+--             local fruits = plant:FindFirstChild("Fruits")
+--             if fruits then
+--                 collectVariantsRecursive(fruits)
+--             end
+--         end
+--     end
 
--- Delay ayarı
-local delayValue = 1 -- varsayılan
+--     local ownFarm = getOwnFarm()
+--     if ownFarm then
+--         local plantsPhysical = ownFarm.Important:FindFirstChild("Plants_Physical")
+--         if plantsPhysical then
+--             collectVariantsRecursive(plantsPhysical)
+--         end
+--     end
+--     return uniqueVariants
+-- end
 
-local DelaySlider = SettingsTab:CreateSlider({
-   Name = "Delay (saniye)",
-   Range = {0.1, 5},
-   Increment = 0.1,
-   Suffix = "s",
-   CurrentValue = delayValue,
-   Flag = "DelayValue",
-   Callback = function(Value)
-       delayValue = Value
-       notify("Delay Ayarlandı", "Delay: " .. tostring(Value) .. " sn")
-   end,
-})
+local function CollectHarvestable(Parent, Plants, IgnoreDistance: boolean?)
+	local Character = LocalPlayer.Character
+	local PlayerPosition = Character:GetPivot().Position
 
-local HttpService = game:GetService("HttpService")
+    for _, Plant in next, Parent:GetChildren() do
+        --// Fruits (nested plants)
+		local Fruits = Plant:FindFirstChild("Fruits")
+		if Fruits then
+			CollectHarvestable(Fruits, Plants, IgnoreDistance)
+		end
 
-local function sendWebhook(title, description)
-    local url = getgenv().WebhookURL
-    if not url or url == "" then return end
+		--// Check if the plant's variant is in the ignore list (blacklist)
+		local Variant = Plant:FindFirstChild("Variant")
+		if Variant and HarvestIgnores[Variant.Value] then 
+            continue -- Skip if in ignore list
+        end
 
-    local data = {
-        ["content"] = "",
-        ["embeds"] = {{
-            ["title"] = title,
-            ["description"] = description,
-            ["color"] = tonumber(0x00ff00),
-            ["footer"] = {["text"] = "Emocii Hub"}
-        }}
-    }
+        -- EkilexekHarvest (whitelist) filtering logic removed as per user request
+        -- All non-ignored plants will be collected
 
-    local encoded = HttpService:JSONEncode(data)
+        --// Collect
+        if CanHarvest(Plant) then
+            table.insert(Plants, Plant)
+        end
+	end
+    return Plants
+end
 
-    local requestFunc = (syn and syn.request) or (http and http.request) or (request) or (fluxus and fluxus.request) or (http_request)
+local PlantsPhysical = nil -- To be defined globally
 
-    if requestFunc then
-        requestFunc({
-            Url = url,
-            Method = "POST",
-            Headers = {["Content-Type"] = "application/json"},
-            Body = encoded
-        })
+local function GetHarvestablePlants(IgnoreDistance: boolean?)
+    local Plants = {}
+    if PlantsPhysical then
+        CollectHarvestable(PlantsPhysical, Plants, IgnoreDistance)
     else
-        warn("Executor desteklemiyor.")
-        notify("Hata", "Executor webhook desteklemiyor.")
+        warn("Error: PlantsPhysical folder not defined.")
     end
+    return Plants
+end
+
+-- Reference for the Total Plant Count display (removed as per user request)
+-- local totalPlantCountDisplay = nil
+
+-- Auto Harvest main function
+local function autoHarvest()
+    local HumanoidRootPart = Character:FindFirstChild("HumanoidRootPart")
+    if not HumanoidRootPart then
+        warn("Error: HumanoidRootPart not found.")
+        return
+    end
+
+    local Humanoid = Character:FindFirstChildOfClass("Humanoid")
+    if not Humanoid then
+        warn("Error: Humanoid not found.")
+        return
+    end
+
+    -- Enable Noclip
+    toggleNoclip(true)
+
+    while autoHarvestEnabled do
+        local ownFarm = getOwnFarm()
+        if ownFarm then
+            PlantsPhysical = ownFarm.Important:FindFirstChild("Plants_Physical") -- Get current folder each loop
+            if PlantsPhysical then
+                local allHarvestablePlants = GetHarvestablePlants()
+                
+                -- Total Plant Count display update logic removed as per user request
+                -- if totalPlantCountDisplay then
+                --     totalPlantCountDisplay.Desc = tostring(#allHarvestablePlants)
+                -- end
+
+                if #allHarvestablePlants > 0 then
+                    -- Select a random plant
+                    local randomIndex = math.random(1, #allHarvestablePlants)
+                    local targetPlant = allHarvestablePlants[randomIndex]
+
+                    -- Set target position slightly above the plant
+                    -- This helps trigger the ProximityPrompt
+                    -- Teleport directly to the plant's position, slightly above it
+                    local targetPosition = targetPlant:GetPivot().Position + Vector3.new(0, 1.5, 0) -- Increased offset for better reach
+                    
+                    print("Teleporting to a random plant: " .. targetPlant.Name .. " @ " .. tostring(targetPosition))
+                    
+                    -- Teleport the character
+                    HumanoidRootPart.CFrame = CFrame.new(targetPosition) * CFrame.Angles(HumanoidRootPart.CFrame:ToOrientation())
+                    
+                    -- Wait for the game to register the new position and activate the prompt
+                    task.wait(0.1) -- Faster wait time for teleportation
+
+                    -- Perform harvest
+                    HarvestPlant(targetPlant)
+                    print("Harvested: " .. targetPlant.Name)
+                    task.wait(0.2) -- Wait after harvest before finding next plant
+                else
+                    print("Warning: No harvestable plants found or not grown yet. Stopping auto harvest.")
+                    autoHarvestEnabled = false -- Stop the loop when nothing to harvest
+                    toggleNoclip(false) -- Revert character state
+                    -- if totalPlantCountDisplay then -- Removed as per user request
+                    --     totalPlantCountDisplay.Desc = "0"
+                    -- end
+                end
+            else
+                warn("Warning: Plants_Physical folder not found. Waiting 1 second.")
+                task.wait(1)
+            end
+        else
+            warn("Warning: Your farm not found. Waiting 1 second.")
+            task.wait(1)
+        end
+    end
+
+    -- Ensure Noclip is disabled when the loop ends naturally
+    toggleNoclip(false)
+    -- if totalPlantCountDisplay then -- Removed as per user request
+    --     totalPlantCountDisplay.Desc = "0" -- Reset count when auto harvest stops
+    -- end
 end
 
 
-SettingsTab:CreateButton({
-   Name = "Bilgileri Webhook'a Gönder",
-   Callback = function()
-       local player = game:GetService("Players").LocalPlayer
-       local ls = player:FindFirstChild("leaderstats")
-       local sheckles = ls and ls:FindFirstChild("Sheckles") and ls.Sheckles.Value or "?"
-       local biome = player:FindFirstChild("Current_Biome") and player.Current_Biome.Value or "?"
+-- Gradient function (from Example.lua (2).txt, for UI)
+function gradient(text, startColor, endColor)
+    local result = ""
+    local length = #text
 
-       -- Alınan tohumları formatla
-       local seedLines = {}
-       for seed, count in pairs(boughtSeedsLog) do
-           table.insert(seedLines, tostring(count) .. "x " .. seed)
-       end
-       local boughtSeedsText = (#seedLines > 0) and table.concat(seedLines, "\n") or "Hiç alınmadı"
+    for i = 1, length do
+        local t = (i - 1) / math.max(length - 1, 1)
+        local r = math.floor((startColor.R + (endColor.R - startColor.R) * t) * 255)
+        local g = math.floor((startColor.G + (endColor.G - startColor.G) * t) * 255)
+        local b = math.floor((startColor.B + (endColor.B - startColor.B) * t) * 255) 
 
-       local msg = "**Delay:** " .. tostring(delayValue) .. " saniye\n" ..
-                   "**Sheckles:** " .. tostring(sheckles) .. "\n" ..
-                   "**Biome:** " .. tostring(biome) .. "\n\n" ..
-                   "**Alınan Tohumlar:**\n" .. boughtSeedsText
+        local char = text:sub(i, i)
+        result = result .. "<font color=\"rgb(" .. r ..", " .. g .. ", " .. b .. ")\">" .. char .. "</font>"
+    end
 
-       sendWebhook("Kullanıcı Bilgisi", msg)
-       notify("Gönderildi", "Webhook'a bilgi gönderildi.")
-   end,
+    return result
+end
+
+local Confirmed = false
+
+-- Popup (from Example.lua, optional)
+WindUI:Popup({
+    Title = "Welcome! Popup Example",
+    Icon = "rbxassetid://129260712070622",
+    IconThemed = true,
+    Content = "This is an Example UI for the " .. gradient("WindUI", Color3.fromHex("#00FF87"), Color3.fromHex("#60EFFF")) .. " Lib",
+    Buttons = {
+        {
+            Title = "Cancel",
+            Callback = function() end,
+            Variant = "Secondary",
+        },
+        {
+            Title = "Continue",
+            Icon = "arrow-right",
+            Callback = function() Confirmed = true end,
+            Variant = "Primary",
+        }
+    }
 })
 
+repeat task.wait() until Confirmed
 
+-- Create the WindUI window (from Example.lua)
+local Window = WindUI:CreateWindow({
+    Title = "Game Info and Settings", -- Title updated
+    Icon = "monitor", -- Icon updated
+    IconThemed = true,
+    Author = "Your Script", -- Author updated
+    Folder = "GameGUI", -- Folder updated
+    Size = UDim2.fromOffset(580, 460),
+    Acrylic = true, -- Added transparency
+    Theme = "Dark",
+    MinimizeKey = Enum.KeyCode.LeftControl,
+    User = {
+        Enabled = true,
+        Callback = function() print("User icon clicked") end,
+        Anonymous = true
+    },
+    SideBarWidth = 200,
+    ScrollBarEnabled = true,
+    KeySystem = { -- <- keysystem enabled
+        Key = { "1234", "5678" },
+        Note = "Enter a key to use the UI. Example Keys: '1234' or '5678'",
+        URL = "https://github.com/Footagesus/WindUI",
+        SaveKey = true,
+    },
+})
 
-tw(30)
-Not("Owner of the hub is Emocii")
-tw(1)
-Not("Owner of the hub is Emocii")
-tw(1)
-Not("Owner of the hub is Emocii")
-tw(1)
-Not("Owner of the hub is Emocii")
-tw(1)
-Not("Owner of the hub is Emocii")
+-- Debugging: Ensure the window was created
+if not Window then
+    warn("Error: WindUI window could not be created! Script stopped.")
+    return
+end
+print("WindUI window successfully created. Type:", typeof(Window))
 
+-- Create tabs and sections
+local Tabs = {}
 
+do
+    -- Main sections (Sections are added to the Window)
+    Tabs.MainSection = Window:Section({ Title = "Main Sections", Opened = true })
+    Tabs.AutoSection = Window:Section({ Title = "Automated Actions", Opened = true }) -- New automated actions section
 
+    -- Information tab
+    Tabs.Info = Tabs.MainSection:Tab({ Title = "Information", Icon = "info" })
+    -- Player Settings tab
+    Tabs.PlayerSettings = Tabs.MainSection:Tab({ Title = "Player Settings", Icon = "user" })
+    -- Stock tab
+    Tabs.Stock = Tabs.MainSection:Tab({ Title = "Stock", Icon = "package" })
+    
+    -- Auto Planting tab (Moved to Automated Actions section)
+    Tabs.AutoPlanting = Tabs.AutoSection:Tab({ Title = "Auto Planting", Icon = "leaf" })
+    -- Auto Buy tab (New)
+    Tabs.AutoBuy = Tabs.AutoSection:Tab({ Title = "Auto Buy", Icon = "shopping-cart" })
+    
+    -- Auto Harvest tab (New)
+    Tabs.AutoHarvest = Tabs.AutoSection:Tab({ Title = "Auto Harvest", Icon = "pickaxe" }) -- Auto Harvest is now a Tab
+    
+    -- Debug tab (New)
+    Tabs.Debug = Tabs.MainSection:Tab({ Title = "Debug", Icon = "bug" }) -- New Debug tab
+    
+    -- Debugging: Ensure tabs and sections were created
+    if not Tabs.Info or not Tabs.PlayerSettings or not Tabs.Stock or not Tabs.AutoPlanting or not Tabs.AutoBuy or not Tabs.AutoHarvest or not Tabs.Debug then
+        warn("Error: Required tabs/sections could not be created! Script stopped.")
+        return
+    end
+    print("Required tabs and sections successfully created.")
+end
 
+-- Information Tab Content
+local shecklesParagraph = nil
+local yourFarmIdParagraph = nil
+local serverFarmIdsParagraph = nil
 
+-- Stock Tab Content
+local seedStockParagraph = nil
+local gearStockParagraph = nil
+local cosmeticStockParagraph = nil
+local stockTimersParagraph = nil
+
+-- Debug Tab Content
+local debugFarmIdParagraph = nil
+local debugShecklesParagraph = nil
+
+do
+    local InfoTab = Tabs.Info
+    local StockTab = Tabs.Stock
+    local DebugTab = Tabs.Debug -- Reference to the new Debug tab
+
+    local function updateAllDisplays()
+        local LocalPlayer = game:GetService("Players").LocalPlayer
+        local shecklesValue = "Loading..."
+        local yourFarmIdContent = "Loading..."
+        local serverFarmIdsContent = "Loading..."
+        local seedStockContent = "Loading..."
+        local gearStockContent = "Loading..."
+        local cosmeticStockContent = "Loading..."
+        local stockTimersContent = "Loading..."
+
+        if not LocalPlayer then
+            warn("Error: LocalPlayer not found! Cannot update info.")
+            shecklesValue = "Error: LocalPlayer not found."
+            yourFarmIdContent = "Error: LocalPlayer not found."
+            serverFarmIdsContent = "Error: LocalPlayer not found."
+            seedStockContent = "Error: LocalPlayer not found."
+            gearStockContent = "Error: LocalPlayer not found."
+            cosmeticStockContent = "Error: LocalPlayer not found."
+            stockTimersContent = "Error: LocalPlayer not found."
+        else
+            -- Get Sheckles value
+            local leaderstats = LocalPlayer:FindFirstChild("leaderstats")
+            if leaderstats then
+                local sheckles = leaderstats:FindFirstChild("Sheckles")
+                if sheckles and (sheckles:IsA("IntValue") or sheckles:IsA("NumberValue")) then
+                    shecklesValue = tostring(sheckles.Value)
+                    currentShecklesAmount = shecklesValue -- Update global variable
+                else
+                    shecklesValue = "Not Found/Invalid Type"
+                    currentShecklesAmount = shecklesValue -- Update global variable
+                end
+            else
+                shecklesValue = "leaderstats not found."
+                currentShecklesAmount = shecklesValue -- Update global variable
+            end
+
+            local localPlayerName = LocalPlayer.Name
+            local farm = workspace:FindFirstChild("Farm")
+
+            if not farm then
+                yourFarmIdContent = "Error: 'Farm' object not found."
+                serverFarmIdsContent = "Error: 'Farm' object not found."
+                warn("Warning: 'Farm' object not found in Workspace.")
+            else
+                local children = farm:GetChildren()
+                localPlayerFarmId = "Not Found" -- Reset for each update
+                localPlayerFarmName = "Not Found"
+                local allServerFarms = {}
+
+                if #children == 0 then
+                    serverFarmIdsContent = "No items found in Farm."
+                else
+                    for _, child in ipairs(children) do
+                        local important = child:FindFirstChild("Important")
+                        if important then
+                            local data = important:FindFirstChild("Data")
+                            if data then
+                                local owner = data:FindFirstChild("Owner")
+                                local farmNumber = data:FindFirstChild("Farm_Number")
+
+                                local ownerValue = "Unused by anyone"
+                                if owner and (owner:IsA("StringValue") or owner:IsA("IntValue") or owner:IsA("NumberValue")) then
+                                    local actualOwnerValue = tostring(owner.Value)
+                                    if actualOwnerValue ~= "" then
+                                        ownerValue = actualOwnerValue
+                                    end
+                                end
+
+                                local farmNumberValue = "Not Found"
+                                if farmNumber and (farmNumber:IsA("IntValue") or farmNumber:IsA("NumberValue") or farmNumber:IsA("StringValue")) then
+                                    farmNumberValue = tostring(farmNumber.Value)
+                                end
+
+                                if ownerValue == localPlayerName then
+                                    localPlayerFarmId = farmNumberValue -- Update player's farm ID
+                                    localPlayerFarmName = child.Name
+                                end
+                                table.insert(allServerFarms, child.Name .. " (Owner: " .. ownerValue .. ", ID: " .. farmNumberValue .. ")")
+                            else
+                                table.insert(allServerFarms, child.Name .. " (Data folder not found)")
+                            end
+                        else
+                            table.insert(allServerFarms, child.Name .. " (Important folder not found)")
+                        end
+                    end
+                    serverFarmIdsContent = table.concat(allServerFarms, "\n")
+                end
+                yourFarmIdContent = "Username: " .. localPlayerName .. "\nFarm ID: " .. localPlayerFarmId
+            end
+
+            -- Get Seed Stock information and filter
+            local seedShopFrame = LocalPlayer.PlayerGui:FindFirstChild("Seed_Shop")
+            if seedShopFrame and seedShopFrame:FindFirstChild("Frame") and seedShopFrame.Frame:FindFirstChild("ScrollingFrame") then
+                local scrollingFrame = seedShopFrame.Frame.ScrollingFrame
+                local seeds = {}
+                for _, itemFrame in ipairs(scrollingFrame:GetChildren()) do
+                    if itemFrame:IsA("Frame") and not itemFrame.Name:find("_Padding") then
+                        local mainFrame = itemFrame:FindFirstChild("Main_Frame")
+                        if mainFrame then
+                            local stockText = mainFrame:FindFirstChild("Stock_Text")
+                            if stockText and stockText:IsA("TextLabel") then
+                                local textValue = stockText.Text:lower():gsub("%s+", "")
+                                if textValue ~= "0" and textValue ~= "nil" and textValue ~= "x0" and textValue ~= "x0stock" and textValue ~= "" then
+                                    table.insert(seeds, itemFrame.Name .. " (" .. stockText.Text .. ")")
+                                    end
+                            end
+                        end
+                    end
+                end
+                if #seeds > 0 then
+                    seedStockContent = table.concat(seeds, "\n")
+                else
+                    seedStockContent = "No active items in seed stock."
+                end
+            else
+                seedStockContent = "Seed_Shop UI not found or structure is different."
+            end
+
+            -- Get Gear Stock information and filter
+            local gearShopFrame = LocalPlayer.PlayerGui:FindFirstChild("Gear_Shop")
+            if gearShopFrame and gearShopFrame:FindFirstChild("Frame") and gearShopFrame.Frame:FindFirstChild("ScrollingFrame") then
+                local scrollingFrame = gearShopFrame.Frame.ScrollingFrame
+                local gears = {}
+                for _, itemFrame in ipairs(scrollingFrame:GetChildren()) do
+                    if itemFrame:IsA("Frame") and not itemFrame.Name:find("_Padding") then
+                        local mainFrame = itemFrame:FindFirstChild("Main_Frame")
+                        if mainFrame then
+                            local stockText = mainFrame:FindFirstChild("Stock_Text")
+                            if stockText and stockText:IsA("TextLabel") then
+                                local textValue = stockText.Text:lower():gsub("%s+", "")
+                                if textValue ~= "0" and textValue ~= "nil" and textValue ~= "x0" and textValue ~= "x0stock" and textValue ~= "" then
+                                    table.insert(gears, itemFrame.Name .. " (" .. stockText.Text .. ")")
+                                end
+                            end
+                        end
+                    end
+                end
+                if #gears > 0 then
+                    gearStockContent = table.concat(gears, "\n")
+                else
+                    gearStockContent = "No active items in gear stock."
+                end
+            else
+                gearStockContent = "Gear_Shop UI not found or structure is different."
+            end
+
+            -- Get Cosmetic Stock information and filter
+            local cosmeticShopUI = LocalPlayer.PlayerGui:FindFirstChild("CosmeticShop_UI")
+            if cosmeticShopUI and cosmeticShopUI:FindFirstChild("CosmeticShop") and
+               cosmeticShopUI.CosmeticShop:FindFirstChild("Main") and
+               cosmeticShopUI.CosmeticShop.Main:FindFirstChild("Holder") and
+               cosmeticShopUI.CosmeticShop.Main.Holder:FindFirstChild("Shop") and
+               cosmeticShopUI.CosmeticShop.Main.Holder.Shop:FindFirstChild("ContentFrame") and
+               cosmeticShopUI.CosmeticShop.Main.Holder.Shop.ContentFrame:FindFirstChild("BottomSegment") then
+                
+                local contentFrame = cosmeticShopUI.CosmeticShop.Main.Holder.Shop.ContentFrame.BottomSegment
+                local cosmetics = {}
+                for _, itemFrame in ipairs(contentFrame:GetChildren()) do
+                    if itemFrame:IsA("Frame") and not itemFrame.Name:find("_Padding") then
+                        local main = itemFrame:FindFirstChild("Main")
+                        if main then
+                            local stock = main:FindFirstChild("Stock")
+                            if stock then
+                                local stockText = stock:FindFirstChild("STOCK_TEXT")
+                                if stockText and stockText:IsA("TextLabel") then
+                                    local textValue = stockText.Text:lower():gsub("%s+", "")
+                                    if textValue ~= "0" and textValue ~= "nil" and textValue ~= "x0" and textValue ~= "x0stock" and textValue ~= "" then
+                                        table.insert(cosmetics, itemFrame.Name .. " (" .. stockText.Text .. ")")
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+                if #cosmetics > 0 then
+                    cosmeticStockContent = table.concat(cosmetics, "\n")
+                else
+                    cosmeticStockContent = "No active items in cosmetic stock."
+                end
+            else
+                cosmeticStockContent = "CosmeticShop_UI not found or structure is different."
+            end
+
+            -- Get Stock Refresh Timers
+            local timers = {}
+            local seedShopTimer = LocalPlayer.PlayerGui:FindFirstChild("Seed_Shop")
+            if seedShopTimer and seedShopTimer:FindFirstChild("Frame") and seedShopTimer.Frame:FindFirstChild("Frame") and seedShopTimer.Frame.Frame:FindFirstChild("Timer") then
+                local timerText = seedShopTimer.Frame.Frame.Timer
+                if timerText:IsA("TextLabel") then
+                    table.insert(timers, "Seed Shop: " .. timerText.Text)
+                end
+            end
+
+            local petShopUI = LocalPlayer.PlayerGui:FindFirstChild("PetShop_UI")
+            if petShopUI and petShopUI:FindFirstChild("Frame") and petShopUI.Frame:FindFirstChild("Frame") and petShopUI.Frame.Frame:FindFirstChild("Timer") then
+                local timerText = petShopUI.Frame.Frame.Timer
+                if timerText:IsA("TextLabel") then
+                    table.insert(timers, "Pet Shop: " .. timerText.Text)
+                end
+            end
+
+            local gearShopTimer = LocalPlayer.PlayerGui:FindFirstChild("Gear_Shop")
+            if gearShopTimer and gearShopTimer:FindFirstChild("Frame") and gearShopTimer.Frame:FindFirstChild("Frame") and gearShopTimer.Frame.Frame:FindFirstChild("Timer") then
+                local timerText = gearShopTimer.Frame.Frame.Timer
+                if timerText:IsA("TextLabel") then
+                    table.insert(timers, "Gear Shop: " .. timerText.Text)
+                end
+            end
+
+            if #timers > 0 then
+                stockTimersContent = table.concat(timers, "\n")
+            else
+                stockTimersContent = "Timers not found."
+            end
+        end
+
+        -- Destroy previous paragraphs (if they exist)
+        if shecklesParagraph then shecklesParagraph:Destroy() end
+        if yourFarmIdParagraph then yourFarmIdParagraph:Destroy() end
+        if serverFarmIdsParagraph then serverFarmIdsParagraph:Destroy() end
+        if seedStockParagraph then seedStockParagraph:Destroy() end
+        if gearStockParagraph then gearStockParagraph:Destroy() end
+        if cosmeticStockParagraph then cosmeticStockParagraph:Destroy() end
+        if stockTimersParagraph then stockTimersParagraph:Destroy() end
+
+        -- Create new paragraphs (add directly to InfoTab and StockTab)
+        shecklesParagraph = InfoTab:Paragraph({
+            Title = "Sheckle Amount:",
+            Desc = shecklesValue
+        })
+
+        yourFarmIdParagraph = InfoTab:Paragraph({
+            Title = "Your Farm ID:",
+            Desc = yourFarmIdContent
+        })
+
+        serverFarmIdsParagraph = InfoTab:Paragraph({
+            Title = "Server Farm IDs:",
+            Desc = serverFarmIdsContent
+        })
+
+        -- Create stock paragraphs
+        seedStockParagraph = StockTab:Paragraph({
+            Title = "Seed Stock:",
+            Desc = seedStockContent
+        })
+
+        gearStockParagraph = StockTab:Paragraph({
+            Title = "Gear Stock:",
+            Desc = gearStockContent
+        })
+        
+        cosmeticStockParagraph = StockTab:Paragraph({
+            Title = "Cosmetic Stock:",
+            Desc = cosmeticStockContent
+        })
+
+        stockTimersParagraph = StockTab:Paragraph({
+            Title = "Stock Refresh Timers:",
+            Desc = stockTimersContent
+        })
+
+        if not shecklesParagraph or not yourFarmIdParagraph or not serverFarmIdsParagraph or not seedStockParagraph or not gearStockParagraph or not cosmeticStockParagraph or not stockTimersParagraph then
+            warn("Error: New info or stock paragraphs could not be created!")
+        end
+    end
+
+    -- Load initial data when GUI is loaded
+    updateAllDisplays()
+
+    -- Loop to automatically update data (less frequent for performance)
+    task.spawn(function()
+        while true do
+            task.wait(1) -- Update every 1 second (less frequent to reduce lag)
+            updateAllDisplays()
+        end
+    end)
+
+    -- Debug tab content (only once for static info)
+    DebugTab:Paragraph({
+        Title = "Initial Farm ID:",
+        Desc = localPlayerFarmId ~= "Not Found" and localPlayerFarmId or "Farm ID not found on startup."
+    })
+    DebugTab:Paragraph({
+        Title = "Initial Sheckles:",
+        Desc = currentShecklesAmount ~= "Loading..." and currentShecklesAmount or "Sheckles amount not loaded on startup."
+    })
+    DebugTab:Paragraph({
+        Title = "Script Status:",
+        Desc = "Script loaded and GUI initialized."
+    })
+end
+
+-- Player Settings Tab Content
+local walkSpeedInputRef = nil
+local jumpPowerInputRef = nil
+
+do
+    local PlayerSettingsTab = Tabs.PlayerSettings -- Hold this variable for convenience
+
+    -- Walk Speed Input (Text Box)
+    walkSpeedInputRef = PlayerSettingsTab:Input({
+        Title = "Walk Speed",
+        Desc = "Sets the player's walk speed.",
+        Value = "16",
+        Placeholder = "Enter Walk Speed",
+        Numeric = true,
+        Finished = false,
+        Callback = function(Value)
+            print("Walk Speed Input value: " .. Value)
+        end
+    })
+
+    -- Jump Power Input (Text Box)
+    jumpPowerInputRef = PlayerSettingsTab:Input({
+        Title = "Jump Power",
+        Desc = "Sets the player's jump power.",
+        Value = "50",
+        Placeholder = "Enter Jump Power",
+        Numeric = true,
+        Finished = false,
+        Callback = function(Value)
+            print("Jump Power Input value: " .. Value)
+        end
+    })
+
+    -- Loop to continuously update WalkSpeed and JumpPower
+    task.spawn(function()
+        while true do
+            task.wait(0.05)
+            local LocalPlayer = game:GetService("Players").LocalPlayer
+            if LocalPlayer and LocalPlayer.Character then
+                local Humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+                if Humanoid then
+                    Humanoid.WalkSpeed = tonumber(walkSpeedInputRef.Value) or 16
+                    Humanoid.JumpPower = tonumber(jumpPowerInputRef.Value) or 50
+                end
+            end
+            if not Window.Enabled then break end
+        end
+    end)
+end
+
+-- Auto Planting Tab Content
+do
+    local AutoPlantingTab = Tabs.AutoPlanting
+
+    AutoPlantingTab:Paragraph({Title = "Selected Location", Desc = "Auto-selects location based on farm number."})
+    
+    local seedDropdown = AutoPlantingTab:Dropdown({
+        Title = "Select Seed",
+        Desc = "Select seeds to auto plant.",
+        Values = {"Carrot", "Strawberry", "Blueberry", "Orange Tulip", "Tomato", "Corn", "Daffodil", "Watermelon", "Pumpkin", "Apple", "Bamboo","Coconut","Cactus","Dragon Fruit","Mango","Grape","Mushroom","Pepper","Cacao","Beanstalk","Ember Lily","Sugar Apple","Burning Bud","Giant Pinecone","Elder Strawbery"},
+        Value = {}, -- No selection initially
+        Multi = true, -- Allow multiple selection
+        AllowNone = true, -- Allow no selection
+        Callback = function(Options)
+            -- Check if Callback is triggered correctly and Options value
+            print("Auto Planting Dropdown Callback triggered! Selected Options: " .. HttpService:JSONEncode(Options))
+            EkilexekSeed = Options
+            print("Auto planting seeds updated: " .. table.concat(Options, ", "))
+        end
+    })
+    
+    -- Check if Dropdown was created successfully
+    if seedDropdown then
+        print("Auto Planting Seed Dropdown successfully created.")
+    else
+        warn("Error: Auto Planting Seed Dropdown could not be created.")
+    end
+
+    AutoPlantingTab:Toggle({
+        Title = "Auto Planting",
+        Desc = "Toggles auto planting on/off.",
+        CurrentValue = false,
+        Callback = function(Value)
+            plantingEnabled = Value
+            if Value then
+                task.spawn(autoPlant)
+                print("Auto planting started.")
+            else
+                print("Auto planting stopped.")
+            end
+        end
+    })
+end
+
+-- Auto Buy Tab Content
+do
+    local AutoBuyTab = Tabs.AutoBuy
+
+    AutoBuyTab:Paragraph({Title = "Seed Purchase", Desc = "Automatically purchases selected seeds."})
+
+    local buySeedDropdown = AutoBuyTab:Dropdown({
+        Title = "Select Seeds to Buy",
+        Desc = "Select seeds to auto purchase.",
+        Values = {"Carrot", "Strawberry", "Blueberry", "Orange Tulip", "Tomato", "Corn", "Daffodil", "Watermelon", "Pumpkin", "Apple", "Bamboo","Coconut","Cactus","Dragon Fruit","Mango","Grape","Mushroom","Pepper","Cacao","Beanstalk","Ember Lily","Sugar Apple","Burning Bud","Giant Pinecone","Elder Strawbery"},
+        Value = {}, -- No selection initially
+        Multi = true, -- Allow multiple selection
+        AllowNone = true, -- Allow no selection
+        Callback = function(Options)
+            print("Auto Buy Dropdown Callback triggered! Selected Options: " .. HttpService:JSONEncode(Options))
+            EkilexekBuySeed = Options
+            print("Auto buying seeds updated: " .. table.concat(Options, ", "))
+        end
+    })
+
+    if buySeedDropdown then
+        print("Auto Buy Seed Dropdown successfully created.")
+    else
+        warn("Error: Auto Buy Seed Dropdown could not be created.")
+    end
+
+    AutoBuyTab:Toggle({
+        Title = "Auto Buy",
+        Desc = "Toggles auto seed purchasing on/off.",
+        CurrentValue = false,
+        Callback = function(Value)
+            autoBuyEnabled = Value
+            if Value then
+                task.spawn(autoBuyLoop)
+                print("Auto buying started.")
+            else
+                print("Auto buying stopped.")
+            end
+        end
+    })
+end
+
+-- Auto Harvest Content (Now a Tab)
+do
+    local AutoHarvestTab = Tabs.AutoSection:Tab({ Title = "Auto Harvest", Icon = "pickaxe" }) 
+
+    AutoHarvestTab:Paragraph({Desc = "Automatically harvests ripe plants on your farm."})
+
+    -- Total Plant Count display and its logic removed as per user request
+    -- totalPlantCountDisplay = AutoHarvestTab:Paragraph({
+    --     Title = "Total Harvestable Plants:",
+    --     Desc = "0" -- Initial value
+    -- })
+
+    -- Dropdown for selecting harvestable items removed as per user request
+    -- local harvestableDropdown = AutoHarvestTab:Dropdown({
+    --     Title = "Alınacak Bitkiler",
+    --     Desc = "Otomatik hasat edilecek bitki türlerini seçin.",
+    --     GetItems = GetAllUniquePlantVariants,
+    --     Value = {},
+    --     Multi = true,
+    --     AllowNone = true,
+    --     Callback = function(Options)
+    --         print("Alınacak Bitkiler Dropdown Callback tetiklendi! Seçilen Seçenekler: " .. HttpService:JSONEncode(Options))
+    --         EkilexekHarvest = Options
+    --         print("Otomatik hasat edilecek bitkiler güncellendi: " .. table.concat(Options, ", "))
+    --     end
+    -- })
+
+    AutoHarvestTab:Toggle({
+        Title = "Auto Harvest",
+        Desc = "Toggles auto harvesting on/off.",
+        CurrentValue = false,
+        Callback = function(Value)
+            autoHarvestEnabled = Value
+            if Value then
+                task.spawn(autoHarvest)
+                -- Enable Noclip here
+                toggleNoclip(true) 
+                print("Auto harvest started.")
+            else
+                -- Disable Noclip here
+                toggleNoclip(false) 
+                print("Auto harvest stopped.")
+                -- if totalPlantCountDisplay then -- Removed as per user request
+                --     totalPlantCountDisplay.Desc = "0"
+                -- end
+            end
+        end
+    })
+
+    AutoHarvestTab:Divider()
+    AutoHarvestTab:Paragraph({Title = "Ignores:"})
+    
+    -- Create checkboxes for HarvestIgnores
+    local function CreateCheckboxes(Parent, Dict: table)
+        for Key, Value in pairs(Dict) do
+            Parent:Toggle({
+                Title = Key, -- Used Title instead of Label
+                Type = "Checkbox",
+                Value = Value,
+                Callback = function(_, newValue)
+                    Dict[Key] = newValue
+                    print("Harvest ignore setting updated: " .. Key .. " = " .. tostring(newValue))
+                end
+            })
+        end
+    end
+    CreateCheckboxes(AutoHarvestTab, HarvestIgnores)
+end
+
+-- When GUI is closed, clean up
+Window:OnClose(function()
+    print("UI closed.")
+    -- Disable Noclip when script closes
+    toggleNoclip(false) 
+    -- if totalPlantCountDisplay then -- Removed as per user request
+    --     totalPlantCountDisplay.Desc = "0"
+    -- end
+end)
+
+-- Select the "Information" tab at startup
+Window:SelectTab(1) -- "Information" tab is the first created tab, so index 1.
+
+-- Show WindUI notification only if WindUI loaded successfully
+if WindUI then
+    -- Send notification after GUI is fully loaded and initial data is updated
+    task.wait(1) -- Short wait for GUI to fully form
+    print(string.format("Script Started! Total Sheckles: %s\nYour Farm ID: %s", currentShecklesAmount, localPlayerFarmId))
+end
